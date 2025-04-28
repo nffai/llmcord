@@ -11,3 +11,9 @@
 !config-example.yaml
 !docker-compose.yaml
 !requirements.txt
+
+
+# Kento adds
+
+!*.example
+!*.template

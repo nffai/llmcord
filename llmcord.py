@@ -3,6 +3,7 @@ from base64 import b64encode
 from dataclasses import dataclass, field
 from datetime import datetime as dt
 import logging
+import os
 from typing import Literal, Optional
 
 import discord
@@ -28,8 +29,74 @@ MAX_MESSAGE_NODES = 500
 
 
 def get_config(filename="config.yaml"):
-    with open(filename, "r") as file:
-        return yaml.safe_load(file)
+    # Load base config from YAML file if it exists
+    try:
+        with open(filename, "r") as file:
+            config = yaml.safe_load(file)
+    except FileNotFoundError:
+        config = {} # Start with an empty config if file doesn't exist
+
+    # Override with environment variables
+    # Simple key-value pairs
+    config["bot_token"] = os.environ.get("BOT_TOKEN", config.get("bot_token"))
+    config["client_id"] = os.environ.get("CLIENT_ID", config.get("client_id"))
+    config["status_message"] = os.environ.get("STATUS_MESSAGE", config.get("status_message"))
+    config["max_text"] = int(os.environ.get("MAX_TEXT", config.get("max_text", 100000)))
+    config["max_images"] = int(os.environ.get("MAX_IMAGES", config.get("max_images", 5)))
+    config["max_messages"] = int(os.environ.get("MAX_MESSAGES", config.get("max_messages", 25)))
+    config["use_plain_responses"] = os.environ.get("USE_PLAIN_RESPONSES", str(config.get("use_plain_responses", False))).lower() == "true"
+    config["allow_dms"] = os.environ.get("ALLOW_DMS", str(config.get("allow_dms", True))).lower() == "true"
+    config["model"] = os.environ.get("MODEL", config.get("model"))
+    config["system_prompt"] = os.environ.get("SYSTEM_PROMPT", config.get("system_prompt", ""))
+
+    # Nested structures (Permissions) - assuming environment variables like PERMISSIONS_USERS_ALLOWED_IDS='id1,id2'
+    config["permissions"] = config.get("permissions", {})
+    for p_type in ["users", "roles", "channels"]:
+        config["permissions"][p_type] = config["permissions"].get(p_type, {})
+        for p_key in ["allowed_ids", "blocked_ids"]:
+            env_var_name = f"PERMISSIONS_{p_type.upper()}_{p_key.upper()}"
+            env_val = os.environ.get(env_var_name)
+            if env_val:
+                # Split by comma and convert to list of strings/ints (assuming IDs are numeric, adjust if not)
+                try:
+                     config["permissions"][p_type][p_key] = [int(x.strip()) for x in env_val.split(",") if x.strip()]
+                except ValueError:
+                     # Handle cases where IDs might not be purely numeric or list is empty
+                     config["permissions"][p_type][p_key] = [x.strip() for x in env_val.split(",") if x.strip()]
+            else:
+                config["permissions"][p_type][p_key] = config["permissions"][p_type].get(p_key, [])
+
+    # Nested structures (Providers) - assuming env vars like PROVIDER_OPENAI_API_KEY
+    config["providers"] = config.get("providers", {})
+    # Define expected providers or dynamically discover from config/env?
+    # For now, let's assume providers are predefined or exist in the base config
+    providers_to_check = list(config["providers"].keys())
+    # Optionally add providers expected from env vars even if not in yaml
+    # Example: if os.environ.get("PROVIDER_CUSTOM_BASE_URL"): providers_to_check.append("custom")
+    
+    for provider_name in providers_to_check:
+        config["providers"][provider_name] = config["providers"].get(provider_name, {})
+        base_url_env = f"PROVIDER_{provider_name.upper()}_BASE_URL"
+        api_key_env = f"PROVIDER_{provider_name.upper()}_API_KEY"
+        
+        config["providers"][provider_name]["base_url"] = os.environ.get(base_url_env, config["providers"][provider_name].get("base_url"))
+        # API key might not exist for all providers, handle appropriately
+        config["providers"][provider_name]["api_key"] = os.environ.get(api_key_env, config["providers"][provider_name].get("api_key"))
+
+    # Nested structures (Extra API Parameters) - difficult to represent flatly in env vars
+    # Keep using YAML for this unless a specific env var override scheme is needed
+    config["extra_api_parameters"] = config.get("extra_api_parameters", {})
+    # Example override (if needed):
+    # config["extra_api_parameters"]["temperature"] = float(os.environ.get("EXTRA_API_TEMPERATURE", config["extra_api_parameters"].get("temperature", 1.0)))
+
+
+    # Ensure essential keys exist, potentially raise error if missing after checking env vars
+    if not config.get("bot_token"):
+        raise ValueError("Bot token is missing. Set BOT_TOKEN environment variable or add it to config.yaml.")
+    if not config.get("model"):
+        raise ValueError("Model is missing. Set MODEL environment variable or add it to config.yaml.")
+        
+    return config
 
 
 cfg = get_config()
