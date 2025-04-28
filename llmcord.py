@@ -33,6 +33,8 @@ def get_config(filename="config.yaml"):
     try:
         with open(filename, "r") as file:
             config = yaml.safe_load(file)
+            if config is None: # Handle empty YAML file case
+                config = {}
     except FileNotFoundError:
         config = {} # Start with an empty config if file doesn't exist
 
@@ -46,7 +48,7 @@ def get_config(filename="config.yaml"):
     config["max_messages"] = int(os.environ.get("MAX_MESSAGES", config.get("max_messages", 25)))
     config["use_plain_responses"] = os.environ.get("USE_PLAIN_RESPONSES", str(config.get("use_plain_responses", False))).lower() == "true"
     config["allow_dms"] = os.environ.get("ALLOW_DMS", str(config.get("allow_dms", True))).lower() == "true"
-    config["model"] = os.environ.get("MODEL", config.get("model"))
+    config["model"] = os.environ.get("MODEL", config.get("model")) # Get MODEL setting first
     config["system_prompt"] = os.environ.get("SYSTEM_PROMPT", config.get("system_prompt", ""))
 
     # Nested structures (Permissions) - assuming environment variables like PERMISSIONS_USERS_ALLOWED_IDS='id1,id2'
@@ -64,28 +66,63 @@ def get_config(filename="config.yaml"):
                      # Handle cases where IDs might not be purely numeric or list is empty
                      config["permissions"][p_type][p_key] = [x.strip() for x in env_val.split(",") if x.strip()]
             else:
-                config["permissions"][p_type][p_key] = config["permissions"][p_type].get(p_key, [])
+                # Ensure default is list even if key exists but is None in YAML
+                config["permissions"][p_type][p_key] = config["permissions"][p_type].get(p_key) if isinstance(config["permissions"][p_type].get(p_key), list) else []
 
-    # Nested structures (Providers) - assuming env vars like PROVIDER_OPENAI_API_KEY
+
+    # Nested structures (Providers)
     config["providers"] = config.get("providers", {})
-    # Define expected providers or dynamically discover from config/env?
-    # For now, let's assume providers are predefined or exist in the base config
-    providers_to_check = list(config["providers"].keys())
-    # Optionally add providers expected from env vars even if not in yaml
-    # Example: if os.environ.get("PROVIDER_CUSTOM_BASE_URL"): providers_to_check.append("custom")
-    
-    for provider_name in providers_to_check:
-        config["providers"][provider_name] = config["providers"].get(provider_name, {})
+    if not isinstance(config["providers"], dict): # Ensure providers is a dict
+        logging.warning("Invalid 'providers' structure in config.yaml, ignoring.")
+        config["providers"] = {}
+
+    # Determine the provider currently selected via MODEL environment variable or config
+    current_provider_name = ""
+    if config.get("model") and isinstance(config.get("model"), str) and "/" in config["model"]:
+        current_provider_name = config["model"].split("/", 1)[0]
+
+    # Create a set of providers to configure: from config.yaml keys + the one from MODEL
+    providers_to_configure = set(config["providers"].keys())
+    if current_provider_name:
+        providers_to_configure.add(current_provider_name)
+        
+    processed_providers = {} # Build a new dictionary for processed providers
+
+    for provider_name in providers_to_configure:
+        # Get existing provider config from yaml or init empty dict
+        provider_config = config["providers"].get(provider_name, {})
+        if not isinstance(provider_config, dict):
+            logging.warning(f"Invalid config for provider '{provider_name}' in config.yaml, ignoring.")
+            provider_config = {}
+
         base_url_env = f"PROVIDER_{provider_name.upper()}_BASE_URL"
         api_key_env = f"PROVIDER_{provider_name.upper()}_API_KEY"
+
+        # Get base_url: prioritize env var, fallback to config.yaml value
+        base_url = os.environ.get(base_url_env, provider_config.get("base_url"))
         
-        config["providers"][provider_name]["base_url"] = os.environ.get(base_url_env, config["providers"][provider_name].get("base_url"))
-        # API key might not exist for all providers, handle appropriately
-        config["providers"][provider_name]["api_key"] = os.environ.get(api_key_env, config["providers"][provider_name].get("api_key"))
+        # Get api_key: prioritize env var, fallback to config.yaml value
+        api_key = os.environ.get(api_key_env, provider_config.get("api_key"))
+
+        # Only add the provider if base_url is actually set
+        if base_url:
+            processed_providers[provider_name] = {
+                "base_url": base_url,
+                "api_key": api_key # api_key can be None, that's fine
+            }
+        elif provider_name == current_provider_name:
+             # Log a warning if the currently selected provider is missing its BASE_URL
+             logging.warning(f"Provider '{provider_name}' is selected in MODEL, but its base URL is not configured. "
+                             f"Set environment variable {base_url_env} or add it to config.yaml.")
+
+    config["providers"] = processed_providers # Replace original providers with the processed one
 
     # Nested structures (Extra API Parameters) - difficult to represent flatly in env vars
     # Keep using YAML for this unless a specific env var override scheme is needed
     config["extra_api_parameters"] = config.get("extra_api_parameters", {})
+    if not isinstance(config["extra_api_parameters"], dict):
+        logging.warning("Invalid 'extra_api_parameters' structure in config.yaml, ignoring.")
+        config["extra_api_parameters"] = {}
     # Example override (if needed):
     # config["extra_api_parameters"]["temperature"] = float(os.environ.get("EXTRA_API_TEMPERATURE", config["extra_api_parameters"].get("temperature", 1.0)))
 
@@ -95,6 +132,10 @@ def get_config(filename="config.yaml"):
         raise ValueError("Bot token is missing. Set BOT_TOKEN environment variable or add it to config.yaml.")
     if not config.get("model"):
         raise ValueError("Model is missing. Set MODEL environment variable or add it to config.yaml.")
+    # Check if the selected provider actually has settings after processing env vars
+    if current_provider_name and current_provider_name not in config["providers"]:
+         raise ValueError(f"Provider '{current_provider_name}' specified in MODEL is not configured correctly. "
+                          f"Ensure {f'PROVIDER_{current_provider_name.upper()}_BASE_URL'} environment variable is set.")
         
     return config
 
